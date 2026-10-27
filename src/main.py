@@ -3,7 +3,7 @@
 Provides a modern dark desktop interface featuring:
 - Bilingual UI toggle (English / French)
 - Video file selector
-- Margin (before/after handles in seconds) and FPS inputs
+- Margin (before/after handles in seconds) and Framerate (FPS) combobox
 - VOD Transcript editor with sample loader
 - Side panel mapping FCP7 marker colors to comma-separated keyword families
   with automatic persistence to `config.json`
@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 from tkinter import filedialog, messagebox
-from typing import Dict
+from typing import Dict, List
 
 import customtkinter as ctk
 
@@ -26,6 +26,9 @@ if str(SRC_DIR) not in sys.path:
 
 from config_manager import DEFAULT_COLOR_KEYWORDS, ConfigManager  # noqa: E402
 from engine import SunScriptEngine  # noqa: E402
+
+FPS_OPTIONS: List[str] = ["24", "25", "30", "50", "60"]
+DEFAULT_FPS: int = 60
 
 COLOR_SWATCH_HEX: Dict[str, str] = {
     "Red": "#D63031",
@@ -107,7 +110,7 @@ class SunScriptApp(ctk.CTk):
         self.lang_switch.pack(side="left")
 
     def _build_left_workspace(self) -> None:
-        """Build the main left panel: video picker, margin inputs, transcript box, and generate button."""
+        """Build the main left panel: video picker, margin/FPS inputs, transcript box, and generate button."""
         self.left_frame = ctk.CTkFrame(self, corner_radius=10)
         self.left_frame.grid(row=1, column=0, sticky="nsew", padx=(16, 8), pady=8)
         self.left_frame.grid_columnconfigure(0, weight=1)
@@ -164,13 +167,22 @@ class SunScriptApp(ctk.CTk):
         self.margin_after_entry.grid(row=0, column=3, sticky="w", padx=(0, 18))
         self.margin_after_entry.bind("<FocusOut>", self._on_settings_modified)
 
-        self.fps_label = ctk.CTkLabel(margins_row, text="")
+        self.fps_label = ctk.CTkLabel(margins_row, text="Framerate (FPS):")
         self.fps_label.grid(row=0, column=4, sticky="w", padx=(0, 6))
 
-        self.fps_entry = ctk.CTkEntry(margins_row, width=65)
-        self.fps_entry.insert(0, str(self.config_mgr.config.get("fps", 30)))
-        self.fps_entry.grid(row=0, column=5, sticky="w")
-        self.fps_entry.bind("<FocusOut>", self._on_settings_modified)
+        configured_fps = str(self.config_mgr.config.get("fps", DEFAULT_FPS))
+        initial_fps = configured_fps if configured_fps in FPS_OPTIONS else str(DEFAULT_FPS)
+
+        self.fps_combobox = ctk.CTkComboBox(
+            margins_row,
+            values=FPS_OPTIONS,
+            width=85,
+            command=self._on_fps_selected,
+        )
+        self.fps_combobox.set(initial_fps)
+        self.fps_combobox.grid(row=0, column=5, sticky="w")
+        # Alias for backward compatibility
+        self.fps_entry = self.fps_combobox
 
         # 3. Transcript Header & Helper Buttons
         transcript_header = ctk.CTkFrame(self.left_frame, fg_color="transparent")
@@ -363,12 +375,16 @@ class SunScriptApp(ctk.CTk):
         self.config_mgr.update_color_keywords(updated_mapping)
         self.status_label.configure(text=self.config_mgr.translate("status_saved_config"))
 
+    def _on_fps_selected(self, _selected_fps: str) -> None:
+        """Persist FPS selection when chosen from the combobox."""
+        self._on_settings_modified()
+
     def _on_settings_modified(self, _event: object = None) -> None:
-        """Persist margin and FPS changes when focus leaves the input boxes."""
+        """Persist margin and FPS changes when focus leaves the input boxes or FPS changes."""
         try:
             before = float(self.margin_before_entry.get().strip())
             after = float(self.margin_after_entry.get().strip())
-            fps = int(float(self.fps_entry.get().strip()))
+            fps = int(float(self.fps_combobox.get().strip()))
             if before >= 0 and after >= 0 and fps > 0:
                 self.config_mgr.update_margins(before, after, fps)
         except ValueError:
@@ -389,7 +405,7 @@ class SunScriptApp(ctk.CTk):
         try:
             margin_before = float(self.margin_before_entry.get().strip())
             margin_after = float(self.margin_after_entry.get().strip())
-            fps = int(float(self.fps_entry.get().strip()))
+            fps = int(float(self.fps_combobox.get().strip()))
             if margin_before < 0 or margin_after < 0 or fps <= 0:
                 raise ValueError("Negative margin or non-positive FPS")
         except ValueError:

@@ -8,9 +8,9 @@
   "margins_section_title": "2. Handles & Sequence Settings",
   "margin_before_label": "Margin Before (sec):",
   "margin_after_label": "Margin After (sec):",
-  "fps_label": "Frame Rate (FPS):",
-  "transcript_section_title": "3. VOD Transcript (Timecode - Description)",
-  "transcript_placeholder": "00:01:15 - Epic boss fight win\n00:04:30 - Funny bug fail\n00:12:45 - Important lore explanation\n01:02:10 - Clutch highlight moment",
+  "fps_label": "Framerate (FPS):",
+  "transcript_section_title": "3. VOD Transcript ([HH:MM:SS] - Description)",
+  "transcript_placeholder": "[00:01:15] - Epic boss fight win\n[00:04:30] - Funny bug fail\n[00:12:45] - Important lore explanation\n[01:02:10] - Clutch highlight moment",
   "settings_section_title": "Marker Color Keywords",
   "settings_subtitle": "Comma-separated keywords (matched with whole-word boundaries). Auto-saved to config.json.",
   "color_Red": "Red",
@@ -32,6 +32,6 @@
   "err_no_video": "Please select a valid existing video file first.",
   "err_invalid_margins": "Margins and FPS must be valid positive numbers.",
   "err_empty_transcript": "The transcript text area is empty.",
-  "err_no_valid_lines": "No valid timecode lines found in the transcript.\nExpected format: HH:MM:SS - Description (or MM:SS - Description)",
+  "err_no_valid_lines": "No valid timecode lines found in the transcript.\nExpected format: [HH:MM:SS] - Description",
   "err_generation_failed": "Failed to generate XML: {error}"
 }

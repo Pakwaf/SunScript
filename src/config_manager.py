@@ -38,7 +38,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "language": "en",
     "margin_before": 3.0,
     "margin_after": 3.0,
-    "fps": 30,
+    "fps": 60,
     "color_keywords": DEFAULT_COLOR_KEYWORDS.copy(),
 }
 
@@ -143,7 +143,7 @@ class ConfigManager:
             self.config["color_keywords"][color] = keywords.strip()
         self.save()
 
-    def update_margins(self, before: float, after: float, fps: int = 30) -> None:
+    def update_margins(self, before: float, after: float, fps: int = 60) -> None:
         """Update and persist margin and FPS preferences."""
         self.config["margin_before"] = float(before)
         self.config["margin_after"] = float(after)

@@ -1,11 +1,13 @@
 """Core FCP7 XML generation, regex keyword matching, and clip collision engine.
 
 This module implements:
-1. Transcript line parsing (`timecode - description`).
-2. Pre-compiled Regex matching with word boundaries (`\\b`) for marker colors.
-3. Margin (handle) application and mathematical merging of overlapping clips.
-4. FCP7 XML (`<xmeml version="4">`) generation with `<sequence>`, `<media>`,
-   `<clipitem>`, and `<marker>` elements compatible with FilmCraft and NLEs.
+1. Transcript line parsing (`[HH:MM:SS] - description` or `HH:MM:SS - description`).
+2. Exact timecode-to-frame conversion (`(hours * 3600 + minutes * 60 + seconds) * FPS`).
+3. Pre-compiled Regex matching with word boundaries (`\\b`) for marker colors.
+4. Frame-accurate margin (handle) conversion (`margin * FPS`) and mathematical
+   merging of overlapping clips.
+5. FCP7 XML (`<xmeml version="4">`) generation with `<sequence>`, `<rate>`,
+   `<media>`, `<clipitem>`, and `<marker>` elements compatible with FilmCraft and NLEs.
 """
 
 from __future__ import annotations
@@ -32,12 +34,13 @@ FCP7_MARKER_COLORS: Dict[str, Tuple[int, int, int, int]] = {
 }
 
 DEFAULT_NEUTRAL_COLOR = "White"
+DEFAULT_FPS = 60
 
 # Matches lines like:
-# "01:23:45 - Boss fight" or "12:34 - Funny moment" or "00:01:05:12 - Frame accurate"
-# Also supports en-dash, em-dash, or colon/whitespace separators.
+# "[00:10:33] - Boss fight" or "[00:10:33] Funny moment" or "01:23:45 - Boss fight"
+# or "12:34 - Funny moment" or "00:01:05:12 - Frame accurate"
 LINE_PATTERN = re.compile(
-    r"^\s*\[?(?P<tc>\d{1,2}:\d{2}(?::\d{2}(?:[:.]\d{1,3})?)?)\]?\s*(?:[-–—:|]\s*|\s+)(?P<desc>.+?)\s*$"
+    r"^\s*\[?(?P<tc>\d{1,2}:\d{2}(?::\d{2}(?:[:.]\d{1,3})?)?)\]?\s*(?:[-–—:|]\s*|\s+)?(?P<desc>.+?)\s*$"
 )
 
 
@@ -50,6 +53,9 @@ class TranscriptEvent:
     color_name: str = DEFAULT_NEUTRAL_COLOR
     start_seconds: float = 0.0
     end_seconds: float = 0.0
+    timestamp_frames: int = 0
+    start_frame: int = 0
+    end_frame: int = 0
 
 
 @dataclass
@@ -58,12 +64,19 @@ class MergedClip:
 
     in_seconds: float
     out_seconds: float
+    in_frame: int = 0
+    out_frame: int = 0
     events: List[TranscriptEvent] = field(default_factory=list)
 
     @property
     def duration_seconds(self) -> float:
         """Return the clip duration in seconds."""
         return max(0.0, self.out_seconds - self.in_seconds)
+
+    @property
+    def duration_frames(self) -> int:
+        """Return the clip duration in frames."""
+        return max(1, self.out_frame - self.in_frame)
 
 
 @dataclass
@@ -127,24 +140,22 @@ class SunScriptEngine:
         return default_color
 
     @staticmethod
-    def parse_timecode_to_seconds(timecode_str: str, fps: int = 30) -> float:
-        """Convert a timecode string (`MM:SS`, `HH:MM:SS`, or `HH:MM:SS:FF`) to seconds.
+    def parse_timecode_hms(timecode_str: str) -> Tuple[int, int, int, int, float]:
+        """Parse `[HH:MM:SS]` (or `MM:SS` / `HH:MM:SS:FF`) into `(hours, minutes, seconds, frames, ms_fraction)`.
 
         Args:
-            timecode_str: Raw timecode string.
-            fps: Sequence frame rate used if frame digits are present.
+            timecode_str: Raw timecode string, optionally wrapped in `[` and `]`.
 
         Returns:
-            Time in seconds as a float.
+            Tuple of `(hours, minutes, seconds, extra_frames, ms_fraction)`.
 
         Raises:
             ValueError: If the timecode format or numeric values are invalid.
         """
-        clean = timecode_str.strip()
+        clean = timecode_str.strip().strip("[]").strip()
         if not clean:
             raise ValueError("Empty timecode string.")
 
-        # Support millisecond dot notation e.g. 00:01:23.500
         ms_fraction = 0.0
         if "." in clean:
             clean, ms_part = clean.split(".", 1)
@@ -165,14 +176,52 @@ class SunScriptEngine:
         if minutes < 0 or seconds < 0 or hours < 0 or frames < 0:
             raise ValueError(f"Negative values in timecode: {timecode_str}")
 
-        total_seconds = (
+        return hours, minutes, seconds, frames, ms_fraction
+
+    @classmethod
+    def parse_timecode_to_frames(cls, timecode_str: str, fps: int = DEFAULT_FPS) -> int:
+        """Convert a `[HH:MM:SS]` timecode string to exact frame count at `fps`.
+
+        Formula:
+            `total_frames = (hours * 3600 + minutes * 60 + seconds) * FPS`
+
+        Args:
+            timecode_str: Raw timecode string (e.g., `[00:10:33]` or `00:10:33`).
+            fps: Sequence frame rate integer.
+
+        Returns:
+            Exact frame number as an integer.
+        """
+        fps_int = max(1, int(fps))
+        hours, minutes, seconds, frames, ms_fraction = cls.parse_timecode_hms(timecode_str)
+        total_seconds = hours * 3600 + minutes * 60 + seconds
+        total_frames = (
+            total_seconds * fps_int
+            + frames
+            + int(round(ms_fraction * fps_int))
+        )
+        return total_frames
+
+    @classmethod
+    def parse_timecode_to_seconds(cls, timecode_str: str, fps: int = DEFAULT_FPS) -> float:
+        """Convert a timecode string (`[HH:MM:SS]`, `MM:SS`, or `HH:MM:SS:FF`) to seconds.
+
+        Args:
+            timecode_str: Raw timecode string.
+            fps: Sequence frame rate used if frame digits are present.
+
+        Returns:
+            Time in seconds as a float.
+        """
+        fps_int = max(1, int(fps))
+        hours, minutes, seconds, frames, ms_fraction = cls.parse_timecode_hms(timecode_str)
+        return (
             hours * 3600.0
             + minutes * 60.0
             + seconds
-            + (frames / float(max(1, fps)))
+            + (frames / float(fps_int))
             + ms_fraction
         )
-        return total_seconds
 
     @classmethod
     def parse_transcript(
@@ -181,25 +230,29 @@ class SunScriptEngine:
         color_keywords: Dict[str, str],
         margin_before: float,
         margin_after: float,
-        fps: int = 30,
+        fps: int = DEFAULT_FPS,
     ) -> List[TranscriptEvent]:
-        """Parse raw transcript lines, apply handles, and assign marker colors.
+        """Parse raw transcript lines, convert timestamps and margins to frames, and assign marker colors.
 
         Args:
-            transcript_text: Multiline transcript string (`timecode - description`).
+            transcript_text: Multiline transcript string (`[HH:MM:SS] - description`).
             color_keywords: Mapping of color names to comma-separated keywords.
             margin_before: Handle in seconds to subtract before the timestamp.
             margin_after: Handle in seconds to add after the timestamp.
-            fps: Frame rate for parsing frame-level timecodes.
+            fps: Exact sequence frame rate integer from the GUI.
 
         Returns:
             Chronologically sorted list of `TranscriptEvent` objects.
         """
+        fps_int = max(1, int(fps))
         compiled_regexes = cls.compile_color_regexes(color_keywords)
         events: List[TranscriptEvent] = []
 
         # Minimum clip duration if both margins are 0
         effective_after = margin_after if (margin_before + margin_after) > 0 else 1.0
+
+        margin_before_frames = int(round(max(0.0, margin_before) * fps_int))
+        margin_after_frames = int(round(max(0.0, effective_after) * fps_int))
 
         for raw_line in transcript_text.splitlines():
             stripped = raw_line.strip()
@@ -214,9 +267,13 @@ class SunScriptEngine:
             if not desc:
                 continue
 
-            ts_sec = cls.parse_timecode_to_seconds(tc_raw, fps=fps)
-            start_sec = max(0.0, ts_sec - max(0.0, margin_before))
-            end_sec = max(start_sec + 0.1, ts_sec + max(0.0, effective_after))
+            total_frames = cls.parse_timecode_to_frames(tc_raw, fps=fps_int)
+            start_frame = max(0, total_frames - margin_before_frames)
+            end_frame = max(start_frame + 1, total_frames + margin_after_frames)
+
+            ts_sec = total_frames / float(fps_int)
+            start_sec = start_frame / float(fps_int)
+            end_sec = end_frame / float(fps_int)
             color = cls.match_marker_color(desc, compiled_regexes)
 
             events.append(
@@ -226,23 +283,30 @@ class SunScriptEngine:
                     color_name=color,
                     start_seconds=start_sec,
                     end_seconds=end_sec,
+                    timestamp_frames=total_frames,
+                    start_frame=start_frame,
+                    end_frame=end_frame,
                 )
             )
 
-        events.sort(key=lambda ev: (ev.start_seconds, ev.timestamp_seconds))
+        events.sort(key=lambda ev: (ev.start_frame, ev.timestamp_frames))
         return events
 
     @staticmethod
-    def merge_overlapping_events(events: List[TranscriptEvent]) -> List[MergedClip]:
+    def merge_overlapping_events(
+        events: List[TranscriptEvent],
+        fps: int = DEFAULT_FPS,
+    ) -> List[MergedClip]:
         """Mathematically merge overlapping or adjacent clips to prevent collisions.
 
-        If clip B starts before or at the exact moment clip A ends
-        (`B.start_seconds <= A.out_seconds`), they are merged into a single
-        contiguous `MergedClip` spanning `[min(in), max(out)]` and preserving
-        all constituent markers.
+        If clip B starts before or at the exact frame clip A ends
+        (`B.start_frame <= A.out_frame`), they are merged into a single
+        contiguous `MergedClip` spanning `[min(in_frame), max(out_frame)]` and
+        preserving all constituent markers.
 
         Args:
             events: List of `TranscriptEvent` items.
+            fps: Sequence frame rate used if frame fields need fallback computation.
 
         Returns:
             List of non-overlapping `MergedClip` instances sorted chronologically.
@@ -250,18 +314,29 @@ class SunScriptEngine:
         if not events:
             return []
 
-        sorted_events = sorted(events, key=lambda e: (e.start_seconds, e.end_seconds))
+        fps_int = max(1, int(fps))
+        for ev in events:
+            if ev.end_frame == 0 and ev.end_seconds > 0:
+                ev.timestamp_frames = int(round(ev.timestamp_seconds * fps_int))
+                ev.start_frame = int(round(ev.start_seconds * fps_int))
+                ev.end_frame = max(ev.start_frame + 1, int(round(ev.end_seconds * fps_int)))
+
+        sorted_events = sorted(events, key=lambda e: (e.start_frame, e.end_frame))
+        first = sorted_events[0]
         merged: List[MergedClip] = [
             MergedClip(
-                in_seconds=sorted_events[0].start_seconds,
-                out_seconds=sorted_events[0].end_seconds,
-                events=[sorted_events[0]],
+                in_seconds=first.start_seconds,
+                out_seconds=first.end_seconds,
+                in_frame=first.start_frame,
+                out_frame=first.end_frame,
+                events=[first],
             )
         ]
 
         for event in sorted_events[1:]:
             current = merged[-1]
-            if event.start_seconds <= current.out_seconds:
+            if event.start_frame <= current.out_frame:
+                current.out_frame = max(current.out_frame, event.end_frame)
                 current.out_seconds = max(current.out_seconds, event.end_seconds)
                 current.events.append(event)
             else:
@@ -269,6 +344,8 @@ class SunScriptEngine:
                     MergedClip(
                         in_seconds=event.start_seconds,
                         out_seconds=event.end_seconds,
+                        in_frame=event.start_frame,
+                        out_frame=event.end_frame,
                         events=[event],
                     )
                 )
@@ -291,7 +368,7 @@ class SunScriptEngine:
         cls,
         video_path: Path,
         merged_clips: List[MergedClip],
-        fps: int = 30,
+        fps: int = DEFAULT_FPS,
     ) -> ET.Element:
         """Construct the FCP7 XML (`<xmeml version="4">`) ElementTree hierarchy.
 
@@ -306,25 +383,31 @@ class SunScriptEngine:
         Returns:
             Root `<xmeml>` `xml.etree.ElementTree.Element`.
         """
-        fps = max(1, int(fps))
+        fps_int = max(1, int(fps))
         xmeml = ET.Element("xmeml", version="4")
         sequence = ET.SubElement(xmeml, "sequence", id="sequence-1")
         ET.SubElement(sequence, "name").text = f"{video_path.stem}_SunScript"
 
+        # Normalize frame boundaries on each clip
+        for clip in merged_clips:
+            if clip.out_frame <= 0 and clip.out_seconds > 0:
+                clip.in_frame = int(round(clip.in_seconds * fps_int))
+                clip.out_frame = max(clip.in_frame + 1, int(round(clip.out_seconds * fps_int)))
+
         # Calculate total timeline frames
         total_timeline_frames = sum(
-            max(1, int(round(clip.out_seconds * fps)) - int(round(clip.in_seconds * fps)))
+            max(1, clip.out_frame - clip.in_frame)
             for clip in merged_clips
         )
         ET.SubElement(sequence, "duration").text = str(total_timeline_frames)
 
         seq_rate = ET.SubElement(sequence, "rate")
-        ET.SubElement(seq_rate, "timebase").text = str(fps)
+        ET.SubElement(seq_rate, "timebase").text = str(fps_int)
         ET.SubElement(seq_rate, "ntsc").text = "FALSE"
 
         timecode_el = ET.SubElement(sequence, "timecode")
         tc_rate = ET.SubElement(timecode_el, "rate")
-        ET.SubElement(tc_rate, "timebase").text = str(fps)
+        ET.SubElement(tc_rate, "timebase").text = str(fps_int)
         ET.SubElement(tc_rate, "ntsc").text = "FALSE"
         ET.SubElement(timecode_el, "string").text = "00:00:00:00"
         ET.SubElement(timecode_el, "frame").text = "0"
@@ -337,7 +420,7 @@ class SunScriptEngine:
         v_format = ET.SubElement(video_el, "format")
         v_sc = ET.SubElement(v_format, "samplecharacteristics")
         v_sc_rate = ET.SubElement(v_sc, "rate")
-        ET.SubElement(v_sc_rate, "timebase").text = str(fps)
+        ET.SubElement(v_sc_rate, "timebase").text = str(fps_int)
         ET.SubElement(v_sc_rate, "ntsc").text = "FALSE"
         ET.SubElement(v_sc, "width").text = "1920"
         ET.SubElement(v_sc, "height").text = "1080"
@@ -357,17 +440,17 @@ class SunScriptEngine:
 
         # Estimate source file duration so it covers the highest out point
         max_out_frames = max(
-            (int(round(c.out_seconds * fps)) for c in merged_clips),
+            (c.out_frame for c in merged_clips),
             default=total_timeline_frames,
         )
-        source_duration_frames = max(max_out_frames + fps * 60, total_timeline_frames)
+        source_duration_frames = max(max_out_frames + fps_int * 60, total_timeline_frames)
         file_id = "file-1"
         pathurl = cls.path_to_fcp7_pathurl(video_path)
 
         timeline_cursor = 0
         for idx, clip in enumerate(merged_clips, start=1):
-            in_frame = int(round(clip.in_seconds * fps))
-            out_frame = max(in_frame + 1, int(round(clip.out_seconds * fps)))
+            in_frame = int(clip.in_frame)
+            out_frame = max(in_frame + 1, int(clip.out_frame))
             clip_duration = out_frame - in_frame
 
             start_frame = timeline_cursor
@@ -384,7 +467,7 @@ class SunScriptEngine:
             ET.SubElement(clipitem, "duration").text = str(source_duration_frames)
 
             clip_rate = ET.SubElement(clipitem, "rate")
-            ET.SubElement(clip_rate, "timebase").text = str(fps)
+            ET.SubElement(clip_rate, "timebase").text = str(fps_int)
             ET.SubElement(clip_rate, "ntsc").text = "FALSE"
 
             ET.SubElement(clipitem, "start").text = str(start_frame)
@@ -397,14 +480,14 @@ class SunScriptEngine:
                 ET.SubElement(file_el, "name").text = video_path.name
                 ET.SubElement(file_el, "pathurl").text = pathurl
                 file_rate = ET.SubElement(file_el, "rate")
-                ET.SubElement(file_rate, "timebase").text = str(fps)
+                ET.SubElement(file_rate, "timebase").text = str(fps_int)
                 ET.SubElement(file_rate, "ntsc").text = "FALSE"
                 ET.SubElement(file_el, "duration").text = str(source_duration_frames)
                 file_media = ET.SubElement(file_el, "media")
                 file_video = ET.SubElement(file_media, "video")
                 file_v_sc = ET.SubElement(file_video, "samplecharacteristics")
                 file_v_rate = ET.SubElement(file_v_sc, "rate")
-                ET.SubElement(file_v_rate, "timebase").text = str(fps)
+                ET.SubElement(file_v_rate, "timebase").text = str(fps_int)
                 ET.SubElement(file_v_rate, "ntsc").text = "FALSE"
                 ET.SubElement(file_v_sc, "width").text = "1920"
                 ET.SubElement(file_v_sc, "height").text = "1080"
@@ -435,7 +518,7 @@ class SunScriptEngine:
             ET.SubElement(audio_clipitem, "duration").text = str(source_duration_frames)
 
             a_clip_rate = ET.SubElement(audio_clipitem, "rate")
-            ET.SubElement(a_clip_rate, "timebase").text = str(fps)
+            ET.SubElement(a_clip_rate, "timebase").text = str(fps_int)
             ET.SubElement(a_clip_rate, "ntsc").text = "FALSE"
 
             ET.SubElement(audio_clipitem, "start").text = str(start_frame)
@@ -458,8 +541,12 @@ class SunScriptEngine:
 
             # Attach markers for each event merged into this clip
             for event in clip.events:
-                marker_frame = int(round(event.timestamp_seconds * fps))
-                marker_frame = max(in_frame, min(out_frame - 1, marker_frame))
+                raw_marker_frame = (
+                    event.timestamp_frames
+                    if event.timestamp_frames > 0 or event.timestamp_seconds == 0
+                    else int(round(event.timestamp_seconds * fps_int))
+                )
+                marker_frame = max(in_frame, min(out_frame - 1, raw_marker_frame))
 
                 marker_el = ET.SubElement(clipitem, "marker")
                 ET.SubElement(marker_el, "name").text = event.description
@@ -499,7 +586,7 @@ class SunScriptEngine:
         margin_before: float,
         margin_after: float,
         color_keywords: Dict[str, str],
-        fps: int = 30,
+        fps: int = DEFAULT_FPS,
     ) -> GenerationResult:
         """Full pipeline: parse transcript, merge collisions, and write FCP7 `.xml` file.
 
@@ -507,11 +594,11 @@ class SunScriptEngine:
 
         Args:
             video_path: Path to the source video file.
-            transcript_text: Multiline VOD transcript (`timecode - description`).
+            transcript_text: Multiline VOD transcript (`[HH:MM:SS] - description`).
             margin_before: Seconds of padding before each event.
             margin_after: Seconds of padding after each event.
             color_keywords: Mapping of marker colors to comma-separated keywords.
-            fps: Sequence frame rate (default 30).
+            fps: Sequence frame rate integer (default 60).
 
         Returns:
             `GenerationResult` containing the output `.xml` path and statistics.
@@ -524,7 +611,8 @@ class SunScriptEngine:
         if not resolved_video.exists() or not resolved_video.is_file():
             raise FileNotFoundError(f"Video file not found: {resolved_video}")
 
-        if margin_before < 0 or margin_after < 0 or fps <= 0:
+        fps_int = int(fps)
+        if margin_before < 0 or margin_after < 0 or fps_int <= 0:
             raise ValueError("Margins must be non-negative and FPS must be positive.")
 
         events = cls.parse_transcript(
@@ -532,16 +620,16 @@ class SunScriptEngine:
             color_keywords=color_keywords,
             margin_before=margin_before,
             margin_after=margin_after,
-            fps=fps,
+            fps=fps_int,
         )
         if not events:
             raise ValueError("No valid timecode lines found in transcript.")
 
-        merged_clips = cls.merge_overlapping_events(events)
+        merged_clips = cls.merge_overlapping_events(events, fps=fps_int)
         root_element = cls.build_fcp7_xml_ElementTree(
             video_path=resolved_video,
             merged_clips=merged_clips,
-            fps=fps,
+            fps=fps_int,
         )
 
         raw_xml_bytes = ET.tostring(root_element, encoding="utf-8")
