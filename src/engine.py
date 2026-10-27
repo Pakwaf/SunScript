@@ -347,6 +347,14 @@ class SunScriptEngine:
 
         video_track = ET.SubElement(video_el, "track")
 
+        # Audio format characteristics and track
+        audio_el = ET.SubElement(media, "audio")
+        a_format = ET.SubElement(audio_el, "format")
+        a_sc = ET.SubElement(a_format, "samplecharacteristics")
+        ET.SubElement(a_sc, "depth").text = "16"
+        ET.SubElement(a_sc, "samplerate").text = "48000"
+        audio_track = ET.SubElement(audio_el, "track")
+
         # Estimate source file duration so it covers the highest out point
         max_out_frames = max(
             (int(round(c.out_seconds * fps)) for c in merged_clips),
@@ -366,7 +374,10 @@ class SunScriptEngine:
             end_frame = timeline_cursor + clip_duration
             timeline_cursor = end_frame
 
-            clipitem = ET.SubElement(video_track, "clipitem", id=f"clipitem-{idx}")
+            video_clip_id = f"clipitem-{idx}"
+            audio_clip_id = f"clipitem-audio-{idx}"
+
+            clipitem = ET.SubElement(video_track, "clipitem", id=video_clip_id)
             ET.SubElement(clipitem, "masterclipid").text = "masterclip-1"
             ET.SubElement(clipitem, "name").text = video_path.name
             ET.SubElement(clipitem, "enabled").text = "TRUE"
@@ -404,6 +415,46 @@ class SunScriptEngine:
                 ET.SubElement(file_audio, "channelcount").text = "2"
             else:
                 ET.SubElement(clipitem, "file", id=file_id)
+
+            v_sourcetrack = ET.SubElement(clipitem, "sourcetrack")
+            ET.SubElement(v_sourcetrack, "mediatype").text = "video"
+            ET.SubElement(v_sourcetrack, "trackindex").text = "1"
+
+            for link_ref, media_type in ((video_clip_id, "video"), (audio_clip_id, "audio")):
+                link_el = ET.SubElement(clipitem, "link")
+                ET.SubElement(link_el, "linkclipref").text = link_ref
+                ET.SubElement(link_el, "mediatype").text = media_type
+                ET.SubElement(link_el, "trackindex").text = "1"
+                ET.SubElement(link_el, "clipindex").text = str(idx)
+
+            # Corresponding synchronized audio clipitem
+            audio_clipitem = ET.SubElement(audio_track, "clipitem", id=audio_clip_id)
+            ET.SubElement(audio_clipitem, "masterclipid").text = "masterclip-1"
+            ET.SubElement(audio_clipitem, "name").text = video_path.name
+            ET.SubElement(audio_clipitem, "enabled").text = "TRUE"
+            ET.SubElement(audio_clipitem, "duration").text = str(source_duration_frames)
+
+            a_clip_rate = ET.SubElement(audio_clipitem, "rate")
+            ET.SubElement(a_clip_rate, "timebase").text = str(fps)
+            ET.SubElement(a_clip_rate, "ntsc").text = "FALSE"
+
+            ET.SubElement(audio_clipitem, "start").text = str(start_frame)
+            ET.SubElement(audio_clipitem, "end").text = str(end_frame)
+            ET.SubElement(audio_clipitem, "in").text = str(in_frame)
+            ET.SubElement(audio_clipitem, "out").text = str(out_frame)
+
+            ET.SubElement(audio_clipitem, "file", id=file_id)
+
+            a_sourcetrack = ET.SubElement(audio_clipitem, "sourcetrack")
+            ET.SubElement(a_sourcetrack, "mediatype").text = "audio"
+            ET.SubElement(a_sourcetrack, "trackindex").text = "1"
+
+            for link_ref, media_type in ((video_clip_id, "video"), (audio_clip_id, "audio")):
+                a_link_el = ET.SubElement(audio_clipitem, "link")
+                ET.SubElement(a_link_el, "linkclipref").text = link_ref
+                ET.SubElement(a_link_el, "mediatype").text = media_type
+                ET.SubElement(a_link_el, "trackindex").text = "1"
+                ET.SubElement(a_link_el, "clipindex").text = str(idx)
 
             # Attach markers for each event merged into this clip
             for event in clip.events:
